@@ -29,17 +29,45 @@ def download_dataset(path, opt_label):
 def oned_label_distribution(data):
     pass
 
+
+def format_annotation(num):
+    if abs(num) >= 1000000:
+        return f'{num//1000000}M'
+    elif abs(num) >= 1000:
+        return f'{num//1000}k'
+    else:
+        return f'{num}'
+
+
 def twod_label_distribution(data, label_col, group_col, labels_names):
     categories_size = data.groupby([group_col, label_col]).size().reset_index(name='count')
     sns_feed = categories_size.pivot(index=group_col, columns=label_col, values='count')
-    ax = sns.heatmap(sns_feed, xticklabels=labels_names)
+    annot_df = sns_feed.applymap(format_annotation)
+
+    ax = sns.heatmap(sns_feed, annot=annot_df, fmt="", xticklabels=labels_names)
     plt.show()
 
-    plt.stackplot(sns_feed.index, sns_feed.T.values, labels=labels_names, colors=sns.color_palette(n_colors=len(sns_feed.columns)))
-    plt.legend(loc='upper left')
+    # sns.barplot(sns_feed.index, sns_feed.T.values, labels=labels_names, colors=sns.color_palette(n_colors=len(sns_feed.columns)))
+    sns_feed.plot(kind='bar', stacked=True, figsize=(8, 6))
+    plt.legend()
     plt.xlabel('group')
     plt.ylabel('stacked count')
     plt.show()  
+
+def resize_and_pad(image, output_size):
+    ratio = min(output_size[0] / image.width, output_size[1] / image.height)    
+    new_width = int(image.width * ratio)
+    new_height = int(image.height * ratio)
+    
+    resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    padded_image = Image.new("RGB", output_size, 'beige')
+    
+    paste_x = (output_size[0] - new_width) // 2
+    paste_y = (output_size[1] - new_height) // 2
+    padded_image.paste(resized_image, (paste_x, paste_y))
+    
+    return padded_image
 
 def find_mean_photo(img_generator):
     result = None
@@ -67,12 +95,33 @@ def all_generator(dataframe_, image_col, random=False):
 def single_generator(dataframe, image_col, group_col, label_col, spec_group, spec_label, random=False):
     yield from all_generator(dataframe[(dataframe[group_col] == spec_group) & (dataframe[label_col] == spec_label)], image_col, random)
 
+from collections.abc import Iterable
+
+def concat_images(*images):
+    """Generate composite of all supplied images."""
+    # Get the widest width.
+    width = max(image.width for image in images)
+    # Add up all the heights.
+    height = sum(image.height for image in images)
+    composite = Image.new('RGB', (width, height))
+    # Paste each image below the one before it.
+    y = 0
+    for image in images:
+        composite.paste(image, (0, y))
+        y += image.height
+    return composite
 
 def draw_image_over_groups(dataframe, get_image, group_enum, label_enum, group_col, label_col, image_col, random=False):
     global_image = get_image(all_generator(dataframe, image_col, random=random))
-    plt.imshow(global_image)
+    if isinstance(global_image, Iterable):
+        fig, axes = plt.subplots(nrows=1, ncols=len(global_image), figsize=(20, 20))
+        for ax, img in zip(axes, global_image):
+            ax.imshow(img)
+            ax.axis('off')
+    else:
+        plt.imshow(global_image)
 
-    fig, axes = plt.subplots(nrows=len(label_enum), ncols=len(group_enum), figsize=(20, 20))
+    fig, axes = plt.subplots(nrows=len(label_enum), ncols=len(group_enum), figsize=(20, 60))
     axes = axes.flatten()
 
     axes_ind = 0
@@ -80,7 +129,11 @@ def draw_image_over_groups(dataframe, get_image, group_enum, label_enum, group_c
         for group in group_enum:
             ax = axes[axes_ind]
             ax.set_title("{}-{}".format(label_name, group))
-            ax.imshow(get_image(single_generator(dataframe, image_col, group_col, label_col, group, label, random=random)))
+            
+            imgs = get_image(single_generator(dataframe, image_col, group_col, label_col, group, label, random=random))
+            if isinstance(global_image, Iterable):
+                imgs = concat_images(*imgs)
+            ax.imshow(imgs)
             ax.axis('off')
             axes_ind += 1
 
@@ -94,15 +147,15 @@ def find_eigenphoto(img_generator, limit = 100):
         result.append(array.copy())
         if all_size > limit:
             break
-    if len(result) == 0:
-        return np.asarray(Image.fromarray(np.zeros((224, 224)))).astype(float)
+    if len(result) < 50:
+        return [np.asarray(Image.fromarray(np.zeros((224, 112)))).astype(float)] * 2
 
     random.shuffle(result)
     images = np.array(result[:limit])
     images -= np.mean(images, axis = 0)
     n_samples, height, width = images.shape
     images_flat = images.reshape(n_samples, -1)
-    pca = PCA(n_components=None, svd_solver="randomized", whiten=False)
+    pca = PCA(n_components=None, svd_solver="randomized")
     pca.fit(images_flat)
     def percentile_scale(arr):
         p2 = np.percentile(arr, 2)
@@ -110,9 +163,8 @@ def find_eigenphoto(img_generator, limit = 100):
         scaled = np.clip((arr - p2) / (p98 - p2) * 255, 0, 255)
         return scaled.astype(np.uint8)
 
-    # Eigen-pictures are the principal components
     eigen_pictures = pca.components_.reshape((n_samples, height, width))
-    return percentile_scale(eigen_pictures[0]).astype(np.uint8)
+    return [percentile_scale(eigen_pictures[i]).astype(np.uint8) for i in range(3)]
 
 
 # TODO: save necessary names in the dataframe info and pass as one structure
@@ -125,17 +177,36 @@ def see_samples(dataframe, labels_enum, group_enum, samples_per_rows, image_col,
             axes_ind = 0
             images_for_iteration = single_generator(dataframe, image_col, group_col, label_col, group, label, random = True)
             for num in range(samples_per_rows):
-                img = next(images_for_iteration)
-                ax = axes[axes_ind]
-                ax.set_title("{}-{}".format(label_name, group))
-                ax.imshow((img).resize((500, 500)))
-                ax.axis('off')
+                try:
+                    img = next(images_for_iteration)
+                    ax = axes[axes_ind]
+                    ax.set_title("{}-{}".format(label_name, group))
+                    ax.imshow((img).resize((500, 500)))
+                    ax.axis('off')
+                except Exception:
+                    pass
                 axes_ind += 1
             plt.show()
             plt.close(fig)
 
 
 def get_colors(img_generator):
+    reds = []
+    blues = []
+    greens = []
+    for img in img_generator:
+        array = np.asarray(img.convert()).astype(float)
+        red = np.mean(array[:, :, 0])
+        green = array[:, :, 1].mean()
+        blue = array[:, :, 2].mean()
+        reds.append(red)
+        blues.append(blue)
+        greens.append(green)
+        
+    return reds, blues, greens
+
+
+def get_color_rels(img_generator):
     red_to_blue = []
     blue_to_green = []
     green_to_red = []
@@ -151,6 +222,15 @@ def get_colors(img_generator):
     return red_to_blue, blue_to_green, green_to_red
 
 
+def draw_color_changes(reds, blues, greens):
+    def draw_channel(channel, color):
+        plt.scatter(range(len(channel)), channel, color=color, label=f'{color} in images')
+    draw_channel(reds, 'red')
+    draw_channel(blues, 'blue')
+    draw_channel(greens, 'green')  
+    plt.legend()
+    plt.show()
+
 def draw_color_distrib(red_to_blue, blue_to_green, green_to_red):
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -162,8 +242,8 @@ def draw_color_distrib(red_to_blue, blue_to_green, green_to_red):
         ax.axvline(1, color='dark'+color, linestyle='--', label='Zero: 10^0')
         ax.legend()
     draw_channel(red_to_blue, axes[0], 'red')
-    draw_channel(green_to_red, axes[1], 'green')  
-    draw_channel(blue_to_green, axes[2], 'blue')
+    draw_channel(blue_to_green, axes[1], 'blue')
+    draw_channel(green_to_red, axes[2], 'green')  
     plt.xscale('log')
     plt.tight_layout()
     plt.show()
@@ -190,34 +270,37 @@ class DataFrameImageDataset(Dataset):
         return image, label
     
 
-def create_cpu_friendly_dataloaders(df, transform, image_path_col='image', label_col='label'):
+def create_cpu_friendly_dataloaders(df, transform, image_path_col='image', label_col='label', cpu_friendly=False):
     # Use smaller dataset for quick iterations
     train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
     
-    # TODO: prepare and uncomment it
     # Start with small subset for testing
-    if len(train_df) > 1000:
-        train_df = train_df.sample(1000, random_state=42)
-    if len(val_df) > 200:
-        val_df = val_df.sample(200, random_state=42)
+    if cpu_friendly:
+        if len(train_df) > 1000:
+            train_df = train_df.sample(1000, random_state=42)
+        if len(val_df) > 200:
+            val_df = val_df.sample(200, random_state=42)
     
     train_dataset = DataFrameImageDataset(train_df, image_path_col, label_col, transform)
     val_dataset = DataFrameImageDataset(val_df, image_path_col, label_col, transform)
     
     # Small batch size for CPU
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0, pin_memory=False)
+    train_loader = DataLoader(train_dataset, batch_size=16 if cpu_friendly else 64, shuffle=True, num_workers=0, pin_memory=False)
+    val_loader = DataLoader(val_dataset, batch_size=16 if cpu_friendly else 64, shuffle=False, num_workers=0, pin_memory=False)
     
     return train_loader, val_loader
 
-def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5):
+def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_friendly=False):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     
-    # Gradient accumulation to simulate larger batch size
-    accumulation_steps = 4
     batch_count = 0
+
+    training_loss = []
+    training_acc = []
+    validation_loss = []
+    validation_acc = []
     
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
@@ -233,30 +316,32 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5):
             
             # Forward pass
             outputs = model(images)
-            loss = criterion(outputs, labels) / accumulation_steps  # Normalize loss
+            loss = criterion(outputs, labels)
             loss.backward()
             
             # Statistics
-            running_loss += loss.item() * accumulation_steps
+            running_loss += loss.item()
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
             
             batch_count += 1
             
-            # Update weights every accumulation_steps
-            if batch_count % accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
             
             if batch_idx % 10 == 0:
                 acc = 100. * correct / total
                 print(f'  Batch {batch_idx}, Loss: {running_loss/(batch_idx+1):.3f}, Acc: {acc:.2f}%')
-        
+        training_loss.append(running_loss / batch_count)
+        training_acc.append(100. * correct / total)
+
+
         # Validation
         model.eval()
         val_correct = 0
         val_total = 0
+        val_loss = 0
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
@@ -264,12 +349,34 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5):
                 _, predicted = outputs.max(1)
                 val_total += labels.size(0)
                 val_correct += predicted.eq(labels).sum().item()
+                
+                loss = criterion(outputs, labels)
+                val_loss += loss.item() * images.size(0)
+        validation_loss.append(val_loss/ val_total)   
         
         val_acc = 100. * val_correct / val_total
+        validation_acc.append(val_acc)
         print(f'Epoch {epoch+1} Complete:')
         print(f'  Train Loss: {running_loss/len(train_loader):.3f}, Train Acc: {100.*correct/total:.2f}%')
         print(f'  Val Acc: {val_acc:.2f}%')
         print('-' * 50)
+    
+    plt.plot(training_acc, label = 'training acc')
+    plt.plot(validation_acc, label = 'validation acc')
+    plt.title("accuracity over the training")
+    plt.xlabel("epoch")
+    plt.ylabel("accuracity")
+    plt.legend()
+    plt.show()
+
+
+    plt.plot(training_loss, label = 'training loss')
+    plt.plot(validation_loss, label = 'validation loss')
+    plt.title("loss over the training")
+    plt.xlabel("epoch")
+    plt.ylabel("loss")
+    plt.legend()
+    plt.show()
 
 def evaluate_model(model, test_loader, device):
     """
