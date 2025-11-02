@@ -222,7 +222,31 @@ def get_color_rels(img_generator):
     return red_to_blue, blue_to_green, green_to_red
 
 
+def sort_out_by_color(img_generator):
+    # TODO: optimize and don't recount it everytime. Might need to write sort by hands
+    def avg_brightess(img):
+        img = np.asarray(img.convert()).astype(float)
+        average_brightness = img.mean() / (img.shape[0] * img.shape[1])
+        return average_brightness
+    imgs = list(map(lambda x: (x, avg_brightess(x)), img_generator))
+    imgs.sort(key=lambda x: x[1])
+    for img in imgs:
+        yield img[0]
+
+
 def draw_color_changes(reds, blues, greens):
+    # fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    # def draw_channel(channel, ax, color):
+    #     ax.scatter(range(len(channel)), channel, color=color, label=f'{color} in images')
+    #     ax.set_title(f'Values of {color} Channel over dataset')
+    #     ax.set_xlabel('images in dataset')
+    #     ax.set_ylabel(f'Value of {color} Channel')
+    #     ax.legend()
+    # draw_channel(reds, axes[0], 'red')
+    # draw_channel(blues, axes[1], 'blue')
+    # draw_channel(greens, axes[2], 'green')  
+    # plt.legend()
+    # plt.show()
     def draw_channel(channel, color):
         plt.scatter(range(len(channel)), channel, color=color, label=f'{color} in images')
     draw_channel(reds, 'red')
@@ -290,12 +314,11 @@ def create_cpu_friendly_dataloaders(df, transform, image_path_col='image', label
     
     return train_loader, val_loader
 
-def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_friendly=False):
+def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_friendly=False, background_run=False):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     
-    batch_count = 0
 
     training_loss = []
     training_acc = []
@@ -308,6 +331,7 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
         running_loss = 0.0
         correct = 0
         total = 0
+        batch_count = 0
         
         optimizer.zero_grad()
         
@@ -361,6 +385,13 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
         print(f'  Val Acc: {val_acc:.2f}%')
         print('-' * 50)
     
+    if background_run:
+        torch.save(model.state_dict(), '/home/kpetrenko/work/models/skin')
+        return ((training_acc, validation_acc), (training_loss, validation_loss))
+    else:
+        draw_model_training_process(training_acc, validation_acc, training_loss, validation_loss)        
+        
+def draw_model_training_process(training_acc, validation_acc, training_loss, validation_loss):
     plt.plot(training_acc, label = 'training acc')
     plt.plot(validation_acc, label = 'validation acc')
     plt.title("accuracity over the training")
@@ -386,18 +417,22 @@ def evaluate_model(model, test_loader, device):
     all_predictions = []
     all_targets = []
     all_probabilities = []
-    
+    test_correct = 0
+    test_all = 0
+
     with torch.no_grad():
         for images, targets in test_loader:
             images = images.to(device)
             outputs = model(images)
             probabilities = torch.softmax(outputs, dim=1)
             _, predictions = torch.max(outputs, 1)
+            test_correct += predictions.eq(targets).sum().item()
+            test_all += targets.numpy().shape[0]
             
             all_predictions.extend(predictions.cpu().numpy())
             all_targets.extend(targets.numpy())
             all_probabilities.extend(probabilities.cpu().numpy())
-    
+    print("correct per cent: ", test_correct / test_all)
     return np.array(all_predictions), np.array(all_targets), np.array(all_probabilities)
 
 
