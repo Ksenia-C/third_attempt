@@ -1,6 +1,9 @@
+import PIL
 import datasets
 import pandas as pd
+from  pathlib import Path
 import seaborn as sns
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
@@ -17,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import models, transforms
 from sklearn.model_selection import train_test_split
-
+import pickle
 
 def download_dataset(path, opt_label):
     # for EDA we can use more of datasets
@@ -25,6 +28,10 @@ def download_dataset(path, opt_label):
     if opt_label in dataset:
         return pd.DataFrame(dataset[opt_label])
     return pd.DataFrame(dataset)
+
+def up_dataset(path):
+    with open(path, 'rb') as f:
+        return pickle.load(f)
 
 def oned_label_distribution(data):
     pass
@@ -52,7 +59,15 @@ def twod_label_distribution(data, label_col, group_col, labels_names):
     plt.legend()
     plt.xlabel('group')
     plt.ylabel('stacked count')
-    plt.show()  
+    plt.show() 
+
+    sns_feed_over_labels = categories_size.pivot(index=label_col, columns=group_col, values='count')
+    sns_feed_over_labels.plot(kind='bar', stacked=True, figsize=(8, 6))
+    plt.legend()
+    plt.xlabel('label')
+    plt.ylabel('stacked count')
+    plt.show() 
+     
 
 def resize_and_pad(image, output_size):
     ratio = min(output_size[0] / image.width, output_size[1] / image.height)    
@@ -61,7 +76,7 @@ def resize_and_pad(image, output_size):
     
     resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
     
-    padded_image = Image.new("RGB", output_size, 'beige')
+    padded_image = Image.new("RGB", output_size, 'black')
     
     paste_x = (output_size[0] - new_width) // 2
     paste_y = (output_size[1] - new_height) // 2
@@ -202,7 +217,18 @@ def get_colors(img_generator):
         reds.append(red)
         blues.append(blue)
         greens.append(green)
-        
+    def calc_stat(arr):
+        arr = torch.Tensor(arr) / 256
+        mean = arr.mean()
+        print(mean)
+        std = arr.std()
+        print(std)
+    print("red: ")
+    calc_stat(reds)
+    print("blues: ")
+    calc_stat(blues)
+    print("greens: ")
+    calc_stat(greens)
     return reds, blues, greens
 
 
@@ -272,14 +298,40 @@ def draw_color_distrib(red_to_blue, blue_to_green, green_to_red):
     plt.tight_layout()
     plt.show()
 
-# Code below is generated and for EDA purpose (I wanted results quick plus didn't have any saved code for it) only on the weak laptop
+# Code below was initially generated and for EDA purpose (I wanted results quick plus didn't have any saved code for it) only on the weak laptop
+# The currect version has some adjustments for my work (checkpoints, augmentation)
 
 class DataFrameImageDataset(Dataset):
-    def __init__(self, dataframe, image_path_col='image', label_col='label', transform=None):
-        self.dataframe = dataframe
+    def __init__(self, dataframe, image_path_col='image', label_col='label', transform=None, scale_aggresive=5, scale_mild=2, augemntation_pipeline=None, consider_small=100, consider_mild = 500):
+        self.augemntation_pipeline = augemntation_pipeline
         self.image_path_col = image_path_col
         self.label_col = label_col
         self.transform = transform
+        if augemntation_pipeline is None:
+            self.dataframe = dataframe
+        else:
+            global_ind = 0
+            label_grouped = dataframe.groupby([self.label_col]).count().reset_index()
+            result_dataframe = []
+            class_sizes_map = {}
+            for i in range(dataframe.shape[0]):
+                label = dataframe.iloc[i][self.label_col]
+                if label not in class_sizes_map:
+                    class_sizes_map[label] = label_grouped[label_grouped[self.label_col] == label][self.image_path_col].values[0]
+                if class_sizes_map[label] < consider_small:
+                    result_dataframe += [[label, dataframe.iloc[i][self.image_path_col], -1]]
+                    result_dataframe += [[label, None, global_ind]] * (scale_aggresive - 1)
+                    global_ind += scale_aggresive
+                elif class_sizes_map[label] < consider_mild:
+                    result_dataframe += [[label, dataframe.iloc[i][self.image_path_col], -1]]
+                    result_dataframe += [[label, None, global_ind]] * (scale_mild - 1)
+                    global_ind += scale_mild
+                else:
+                    result_dataframe += [[label, dataframe.iloc[i][self.image_path_col], -1]]
+                    global_ind += 1
+            self.dataframe = pd.DataFrame(result_dataframe, columns=[self.label_col, self.image_path_col, "index_of_original"])
+
+                    
                 
     def __len__(self):
         return len(self.dataframe)
@@ -287,39 +339,88 @@ class DataFrameImageDataset(Dataset):
     def __getitem__(self, idx):
         image = self.dataframe.iloc[idx][self.image_path_col]
         label = self.dataframe.iloc[idx][self.label_col]
-                
+
+        if self.augemntation_pipeline is not None:
+            if self.dataframe.iloc[idx]["index_of_original"] != -1:
+                image = self.dataframe.iloc[self.dataframe.iloc[idx]["index_of_original"]][self.image_path_col]
+                image = PIL.Image.fromarray(self.augemntation_pipeline(image=np.asarray(image.convert()))['image'])
         if self.transform:
             image = self.transform(image)
-            
         return image, label
     
 
-def create_cpu_friendly_dataloaders(df, transform, image_path_col='image', label_col='label', cpu_friendly=False):
-    # Use smaller dataset for quick iterations
-    train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
+def create_cpu_friendly_dataloaders(df, transform, image_path_col='image', label_col='label', cpu_friendly=False, augemntation_pipeline=None, consider_small=100, consider_mild=500):
+    train_df, val_df = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
     
     # Start with small subset for testing
     if cpu_friendly:
-        if len(train_df) > 1000:
-            train_df = train_df.sample(1000, random_state=42)
+        if len(train_df) > 500:
+            train_df = train_df.sample(500, random_state=42)
         if len(val_df) > 200:
             val_df = val_df.sample(200, random_state=42)
     
-    train_dataset = DataFrameImageDataset(train_df, image_path_col, label_col, transform)
+    train_dataset = DataFrameImageDataset(train_df, image_path_col, label_col, transform, augemntation_pipeline=augemntation_pipeline, consider_small=consider_small, consider_mild=consider_mild)
     val_dataset = DataFrameImageDataset(val_df, image_path_col, label_col, transform)
     
     # Small batch size for CPU
-    train_loader = DataLoader(train_dataset, batch_size=16 if cpu_friendly else 64, shuffle=True, num_workers=0, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=16 if cpu_friendly else 64, shuffle=False, num_workers=0, pin_memory=False)
+    train_loader = DataLoader(train_dataset, batch_size=16 if cpu_friendly else 128, shuffle=True, num_workers=4, prefetch_factor=2, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=16 if cpu_friendly else 128, shuffle=False, num_workers=0)
     
     return train_loader, val_loader
 
-def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_friendly=False, background_run=False):
+class TrainingInfo:
+    def __init__(self, training_acc, validation_acc, training_loss, validation_loss):
+        self.training_acc = training_acc
+        self.validation_acc = validation_acc
+        self.training_loss = training_loss
+        self.validation_loss = validation_loss
+    def checkpoint(self, file_path):
+        with open(file_path, 'w') as f:
+            # training_acc
+            json.dump(self.training_acc, f)
+            f.write('\n')
+
+            # validation_acc
+            json.dump(self.validation_acc, f)
+            f.write('\n')
+
+            # training_loss
+            json.dump(self.training_loss, f)
+            f.write('\n')
+
+            # validation_loss
+            json.dump(self.validation_loss, f)
+            f.write('\n')
+    def regain_and_draw(self, path):
+        with open(path, 'r') as f:
+            self.training_acc = json.loads(f.readline())
+            self.validation_acc =  json.loads(f.readline())
+            self.training_loss = json.loads(f.readline())
+            self.validation_loss = json.loads(f.readline())
+
+        draw_model_training_process(self.training_acc, self.validation_acc, self.training_loss, self.validation_loss)
+
+class CheckpointManagement:
+    def __init__(self, points_num=2, base_path="/home/kpetrenko/work/models_chs"):
+        if points_num < 1:
+            raise "incorrect points_num: " + str(points_num)
+        self.points_num = points_num
+        self.base_path = base_path
+        self.current_ch_position = 0
+    def checkpoint(self, model, training_info):
+        base_path = Path(f"{self.base_path}_{self.current_ch_position}")
+        base_path.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), base_path / 'skin')
+        training_info.checkpoint(base_path / "skin_progress")
+        self.current_ch_position = (self.current_ch_position + 1) % self.points_num
+
+def cpu_friendly_train(device, model, model_parameters, train_loader, val_loader, epochs=5, cpu_friendly=False, background_run=False, checkpoint_frequency=3):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-    
+    optimizer = optim.Adam(model_parameters, lr=1e-3)
 
+
+    ch_manager = CheckpointManagement() 
     training_loss = []
     training_acc = []
     validation_loss = []
@@ -331,11 +432,11 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
         running_loss = 0.0
         correct = 0
         total = 0
-        batch_count = 0
         
         optimizer.zero_grad()
         
         for batch_idx, (images, labels) in enumerate(train_loader):
+            # images = images.to(memory_format=torch.channels_last)
             images, labels = images.to(device), labels.to(device)
             
             # Forward pass
@@ -348,16 +449,14 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
-            
-            batch_count += 1
-            
+                        
             optimizer.step()
             optimizer.zero_grad()
             
             if batch_idx % 10 == 0:
                 acc = 100. * correct / total
                 print(f'  Batch {batch_idx}, Loss: {running_loss/(batch_idx+1):.3f}, Acc: {acc:.2f}%')
-        training_loss.append(running_loss / batch_count)
+        training_loss.append(running_loss / len(train_loader))
         training_acc.append(100. * correct / total)
 
 
@@ -368,6 +467,7 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
         val_loss = 0
         with torch.no_grad():
             for images, labels in val_loader:
+                # images = images.to(memory_format=torch.channels_last)
                 images, labels = images.to(device), labels.to(device)
                 outputs = model(images)
                 _, predicted = outputs.max(1)
@@ -382,12 +482,15 @@ def cpu_friendly_train(device, model, train_loader, val_loader, epochs=5, cpu_fr
         validation_acc.append(val_acc)
         print(f'Epoch {epoch+1} Complete:')
         print(f'  Train Loss: {running_loss/len(train_loader):.3f}, Train Acc: {100.*correct/total:.2f}%')
-        print(f'  Val Acc: {val_acc:.2f}%')
+        print(f'  Val Loss: {val_loss/ val_total}, Val Acc: {val_acc:.2f}%')
+        if checkpoint_frequency > 0 and (epoch + 1) % checkpoint_frequency == 0:
+            print("running a checkpoint")
+            ch_manager.checkpoint(model, TrainingInfo(training_acc, validation_acc, training_loss, validation_loss))
         print('-' * 50)
     
     if background_run:
         torch.save(model.state_dict(), '/home/kpetrenko/work/models/skin')
-        return ((training_acc, validation_acc), (training_loss, validation_loss))
+        TrainingInfo(training_acc, validation_acc, training_loss, validation_loss).checkpoint('/home/kpetrenko/work/models/skin_progress')
     else:
         draw_model_training_process(training_acc, validation_acc, training_loss, validation_loss)        
         
