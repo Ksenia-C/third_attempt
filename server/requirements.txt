@@ -1,0 +1,10 @@
+fastapi[all]
+uvicorn[standard]
+sqlalchemy>=2.0.0
+flwr[simulation]
+flwr-datasets[vision]
+torch
+torchvision
+scipy
+aiosqlite
+scikit-learn
