@@ -238,15 +238,21 @@ class PartitionerActor:
             p_for_gini = []
             for class_ in range(class_number):
                 class_presence = train_data[train_data[self.label_coumn] == class_].shape[0]
-                for_disp_per_class[class_] = for_disp_per_class.get(class_, []) + [class_presence]
+                for_disp_per_class[class_] = for_disp_per_class.get(class_, []) + [class_presence / train_data.shape[0]]
                 p_for_gini.append(class_presence / train_data.shape[0])
             ginis.append(sum([p * (1 - p) for p in p_for_gini]))
 
-        return {
+        stats = {
             'size_std': np.std([x / all_data_cnt for x in sizes_for_disp]),
-            'class_std': {class_: np.std([v / sum(values) for v in values]) for class_, values in for_disp_per_class.items()},
+            'class_std': {class_: np.std(values) for class_, values in for_disp_per_class.items()},
             'local_std': sum([(1 - x)**2 for x in ginis]) / self.partitioner.num_partitions
         }
+        area_elements = [stats['size_std']] + [stats['local_std']] + sorted([value for key, value in stats['class_std'].items()])
+        area = 0
+        for ind in range(1, len(area_elements)):
+            area += (area_elements[ind - 1] + area_elements[ind]) / 2
+        stats['area'] = area 
+        return stats
 
 
 def load_partition(partition, partition_id: int, num_partitions: int, run_id: str, label_col, augemntation_pipeline, saver_directory, random_state):    

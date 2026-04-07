@@ -3,11 +3,50 @@
 import scipy.stats as stats
 import numpy as np
 import pandas as pd
+import math
 
 
 from datasets import Dataset
 from datasets import concatenate_datasets
 
+class SlidingWindowDistribution:
+    def __init__(self, speed_name, alpha):
+        self.speed_name = speed_name
+        self.alpha = alpha
+    def rvs(self, size, random_state):
+        max_size = 8000
+        n_clients = size
+        alpha = self.alpha
+
+        mu = 100
+        probability = []
+        # how much weight we need to add to each client iteratively so that their sum is about max_size
+        # can be seen via formula of additive progression and some thoughts I can't remember right now (but I was smart enough to intuitively and somehow get this formula for addition)
+        about_additions = max_size / n_clients**2
+        def speed_foo(previous, iteration):
+            # 2 growing_linear. can be used with 1.4 (growing disbalance) and -2.4 (about independent random)
+            if self.speed_name == 'growing_linear':
+                return previous + about_additions * (iteration + 1)**(1.4)
+            # 3 large_heavy. more large size about to uniform 
+            if self.speed_name == 'large_heavy':
+                return previous + about_additions * (n_clients - abs(iteration))**0.4
+            # 5 small_heavy. more small size about to uniform
+            if self.speed_name == 'small_heavy':
+                if iteration < 4:
+                    iteration = n_clients/2
+                return previous + about_additions * alpha**abs(math.cos(iteration/n_clients*math.pi))
+            raise RuntimeError(f"unknown speed upgradion name for Rolling Norm {self.speed_name}")
+        rng = np.random.RandomState(random_state)
+
+        for i in range(n_clients):
+            # we are making the sliding bell of normal distribution that can speed up where we need more rare number of sizes (small or large) and slow down - where we need them more
+            # this way we go over all possible sizes we'd like to cover and later - scale them so that they sum up to max_size
+            # max with about_additions is made to remove too small generated values
+            # mu*0.20 for std - just chosen from the running this code in test mode and choosing about right std
+            X1 = max(about_additions, rng.normal(mu, max(about_additions, mu*0.20), 1)[0])
+            probability.append(X1)
+            mu = speed_foo(mu, i)
+        return probability
 
 def get_distribution(name: str, config):
     if name == "norm":
@@ -18,6 +57,8 @@ def get_distribution(name: str, config):
         return stats.uniform(loc=config.get('loc', 0), scale=config.get('scale', 1))
     if name == 'pow':
         return stats.powerlaw(a = config.get('a', 1.5))
+    if name in ['growing_linear', 'large_heavy', 'small_heavy']:
+        return SlidingWindowDistribution(speed_name=name, alpha=config.get('alpha', 1.4))
     raise RuntimeError("unimplemented [get_distribution]")
 
 
