@@ -3,6 +3,9 @@
 setup='{
     "fl_algorithm": "fed_avg",
     "data_distribution": "rare_on_rare",
+    "clients": {
+        "count": 10
+    },
     "algorithm_params": {
         "global_rounds_num": 7,
         "local_epochs": 3
