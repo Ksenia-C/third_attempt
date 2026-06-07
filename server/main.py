@@ -8,7 +8,7 @@ from sql_models import SimulationRuns, RunProgress, RunStats, Base
 import json
 import uuid
 import flwr
-from scaffold_srategy import ScaffoldStrategy
+from server.strategies.scaffold_srategy import ScaffoldStrategy
 from drawings import *
 from flwr.simulation import run_simulation
 from pathlib import Path
@@ -95,7 +95,11 @@ class SimulationRun(BaseModel):
     distribution_params: Dict[str, Any] = {}
     saver_directory: Path = None
     augemntation_need: bool = False
+    clients: Dict[str, Any] = {}
 
+
+class SimulationManyRun(BaseModel):
+    saver_directory: Path = None
 
 import torchvision.models as models
 import torch
@@ -173,7 +177,9 @@ class ExtraMods:
                 p=0.9
             )
             ])
-
+    def string(self):
+        return  f"{self.augmentation}"
+    
 
 class RandomStateInitialization:
     def __init__(self, clients_id_ranges):
@@ -183,17 +189,17 @@ class RandomStateInitialization:
     def get_random_state(self, client_id):
         return self.random_state[client_id]
 
-def run_simulation_impl(fl_algorithm: FLAlgorithm, data_distribution: Distribution, algorithm_params: Dict, distribution_params: Dict, run_id: str, saver_directory: str, extra_mods : ExtraMods):
+def run_simulation_impl(fl_algorithm: FLAlgorithm, data_distribution: Distribution, algorithm_params: Dict, distribution_params: Dict, run_id: str, saver_directory: str, extra_mods : ExtraMods, clients_params: Dict):
     # label_col = 'coarse_label'
     # TODO: move it to some other class
     label_col = 'label'
     augemntation_pipeline = extra_mods.augmentation
     
-    num_clients = 5 if fl_algorithm != FLAlgorithm.STANDALONE else 1
+    num_clients = int(clients_params['count']) if fl_algorithm != FLAlgorithm.STANDALONE else 1
     saver_directory = Path(saver_directory) / run_id
     saver_directory.mkdir(parents=True)
     with open(saver_directory / "simulation_params.txt", "w") as file:
-        print(f"fl_algorithm {fl_algorithm}\n data_distribution {data_distribution}\n algorithm_params {algorithm_params}\n distribution_params {distribution_params}", file=file)
+        print(f"fl_algorithm {fl_algorithm}\n data_distribution {data_distribution}\n algorithm_params {algorithm_params}\n distribution_params {distribution_params} extra_mods {extra_mods.string()} clients {clients_params}", file=file)
 
     partitioner_actor = ray.get_actor("partitioner_actor")
     creation_ref = partitioner_actor.create_partitioner.remote(data_distribution.value, distribution_params, num_clients, run_id, saver_directory, label_col)
@@ -273,7 +279,22 @@ def run_simulation_impl(fl_algorithm: FLAlgorithm, data_distribution: Distributi
         print("ERROR", exp)
         asyncio.run(on_error(run_id))
 
+def run_many_exps_from_path(path_to_config_folder: Path):
+    with open(path_to_config_folder / 'config.json', 'r') as file:
+        conf_exps = json.load(file)
+    for exp_name, exp_config in conf_exps:
+        with open(path_to_config_folder / 'exp_saviour.txt', 'r') as saviour_file:
+            if exp_name in saviour_file.readlines():
+                continue
+        run_id = exp_name + str(uuid.uuid4())
+        extra_mods = ExtraMods()
+        if exp_config['augemntation_need'] == 'true':
+            extra_mods.set_augmentation()
 
+        run_simulation_impl(exp_config['fl_algorithm'], exp_config['data_distribution'], exp_config['algorithm_params'], exp_config['distribution_params'], run_id, path_to_config_folder, extra_mods)
+
+        with open(path_to_config_folder / 'exp_saviour.txt', 'a') as saviour_file:
+            saviour_file.write(exp_name + '\n')
 
 class ForwardResponse(BaseModel):
     run_id: str = Field(...)
@@ -340,7 +361,8 @@ async def forward(
             user_data.distribution_params,
             run_id, 
             user_data.saver_directory,
-            extra_mods
+            extra_mods,
+            user_data.clients
         )
     task = asyncio.create_task(coro)
     return ForwardResponse(run_id = run_id)
@@ -360,7 +382,7 @@ async def forward_distribution(
     fl_algorithm = user_data.fl_algorithm
     saver_directory = Path(user_data.saver_directory) / "view_data_distribution_ahead"
 
-    num_clients = 5 if fl_algorithm != FLAlgorithm.STANDALONE else 1
+    num_clients = int(user_data.clients['count']) if fl_algorithm != FLAlgorithm.STANDALONE else 1
     saver_directory.mkdir(parents=True, exist_ok=True)
 
     label_col = 'label'
@@ -371,6 +393,23 @@ async def forward_distribution(
     iid_metrics = partitioner_actor.get_disbalance_metric.remote(class_numbers, RandomStateInitialization(range(num_clients)))
     plot_std_data(ray.get(iid_metrics), save_dir=saver_directory)
     return ForwardResponse(run_id = "")
+
+@app.post(
+    "/forward_long_run",
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new runs of simulation",
+    description="Start a new simulation with results that can be gotten by /check"
+)
+async def forward(
+    user_data: SimulationManyRun,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+) -> ForwardResponse:
+
+    coro = asyncio.to_thread(run_many_exps_from_path, user_data.saver_directory)
+    task = asyncio.create_task(coro)
+    return ForwardResponse(run_id = 'run_id')
+
 
 
 @app.get(

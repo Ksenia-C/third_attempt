@@ -1,0 +1,20 @@
+{
+    "exp_avg_rare_on_rare": {
+        "fl_algorithm": "fed_avg",
+        "data_distribution": "rare_on_rare",
+        "clients": {
+            "count": 10
+        },
+        "algorithm_params": {
+            "global_rounds_num": 7,
+            "local_epochs": 3
+        },
+        "distribution_params": {
+            "sized_distribution": "growing_linear",
+            "rare_clients":2,
+            "rare_data_count": 4,
+            "alpha": 1.4,
+            "random_state": 2473
+        }
+    }
+}

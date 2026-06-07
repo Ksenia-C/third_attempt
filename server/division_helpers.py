@@ -26,10 +26,10 @@ class SlidingWindowDistribution:
         def speed_foo(previous, iteration):
             # 2 growing_linear. can be used with 1.4 (growing disbalance) and -2.4 (about independent random)
             if self.speed_name == 'growing_linear':
-                return previous + about_additions * (iteration + 1)**(1.4)
+                return previous + about_additions * (iteration + 1)**alpha
             # 3 large_heavy. more large size about to uniform 
             if self.speed_name == 'large_heavy':
-                return previous + about_additions * (n_clients - abs(iteration))**0.4
+                return previous + about_additions * (n_clients - abs(iteration))**alpha
             # 5 small_heavy. more small size about to uniform
             if self.speed_name == 'small_heavy':
                 if iteration < 4:
